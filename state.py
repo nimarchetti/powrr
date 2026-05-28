@@ -15,6 +15,8 @@ SENSORS = [
     {"id": "battery_power",             "label": "Battery"},
 ]
 
+SOC_SENSOR_ID = "inverter_battery_soc"
+
 
 class DataStore:
     """Thread-safe store for current sensor values and units."""
@@ -22,6 +24,7 @@ class DataStore:
     def __init__(self):
         self._lock = threading.Lock()
         self._data = {s["id"]: {"value": None, "unit": None} for s in SENSORS}
+        self._soc = None
 
     def set_value(self, sensor_id: str, value: float) -> None:
         with self._lock:
@@ -35,6 +38,14 @@ class DataStore:
         with self._lock:
             d = self._data[sensor_id]
             return d["value"], d["unit"]
+
+    def set_soc(self, value: float) -> None:
+        with self._lock:
+            self._soc = value
+
+    def get_soc(self) -> "float | None":
+        with self._lock:
+            return self._soc
 
 
 class AppState:

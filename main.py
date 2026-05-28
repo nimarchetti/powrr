@@ -6,7 +6,7 @@ import threading
 import zmq
 import paho.mqtt.client as mqtt
 
-from state import DataStore, AppState, SENSORS, UIMode
+from state import DataStore, AppState, SENSORS, UIMode, SOC_SENSOR_ID
 from history import History
 from renderer import render_live, render_graph
 
@@ -34,6 +34,7 @@ def _is_burst() -> bool:
 # ── MQTT ──────────────────────────────────────────────────────────────────────
 
 _SENSOR_IDS = [s["id"] for s in SENSORS]
+_SOC_TOPIC  = f"homeassistant/sensor/{SOC_SENSOR_ID}/state"
 
 
 def _on_connect(client, userdata, connect_flags, reason_code, properties):
@@ -43,12 +44,19 @@ def _on_connect(client, userdata, connect_flags, reason_code, properties):
     for sid in _SENSOR_IDS:
         client.subscribe(f"homeassistant/sensor/{sid}/state")
         client.subscribe(f"homeassistant/sensor/{sid}/unit_of_measurement")
+    client.subscribe(_SOC_TOPIC)
     print("MQTT connected and subscribed")
 
 
 def _on_message(client, userdata, msg):
     topic   = msg.topic
     payload = msg.payload.decode("utf-8").strip()
+    if topic == _SOC_TOPIC:
+        try:
+            data_store.set_soc(float(payload))
+        except ValueError:
+            pass
+        return
     for sid in _SENSOR_IDS:
         if topic == f"homeassistant/sensor/{sid}/state":
             try:
@@ -127,16 +135,39 @@ def _start_event_listener(zmq_context: zmq.Context) -> None:
 _sequence = 0
 
 
-def _send_frame(frame_socket, image) -> None:
+def _parse_display_sizes() -> list[tuple[int, int]]:
+    """Return (width, height) pairs this mode should render for."""
+    mode_name = os.environ.get("MODE_NAME", "powrr")
+    raw = os.environ.get("DISPLAY_REGISTRY", "").strip()
+    if raw:
+        try:
+            registry = json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+        else:
+            sizes: list[tuple[int, int]] = []
+            seen: set[tuple[int, int]] = set()
+            for entry in registry:
+                if any(m.get("mode_name") == mode_name for m in entry.get("modes", [])):
+                    wh = (int(entry["width"]), int(entry["height"]))
+                    if wh not in seen:
+                        seen.add(wh)
+                        sizes.append(wh)
+            if sizes:
+                return sizes
+    w = int(os.environ.get("DISPLAY_WIDTH", "256"))
+    h = int(os.environ.get("DISPLAY_HEIGHT", "64"))
+    return [(w, h)]
+
+
+def _send_frame(frame_socket, image, mode_name: str) -> None:
     global _sequence
-    header = json.dumps({
-        "width":        image.width,
-        "height":       image.height,
-        "pixel_format": "L",
-        "sequence":     _sequence,
-        "timestamp_ms": int(time.time() * 1000),
-    }).encode("utf-8")
-    frame_socket.send_multipart([header, image.tobytes()])
+    frame_socket.send_multipart([
+        mode_name.encode(),
+        str(image.width).encode(),
+        str(image.height).encode(),
+        image.tobytes(),
+    ])
     _sequence += 1
 
 
@@ -144,13 +175,14 @@ def _send_frame(frame_socket, image) -> None:
 
 def main() -> None:
     zmq_context  = zmq.Context()
-    frame_socket = zmq_context.socket(zmq.PUSH)
-    frame_socket.connect(os.environ["SWITCHRR_FRAME_ADDRESS"])
+    frame_socket = zmq_context.socket(zmq.PUB)
+    frame_socket.bind(os.environ["SWITCHRR_FRAME_BIND_ADDRESS"])
 
     _start_mqtt()
     _start_event_listener(zmq_context)
 
-    print(f"powrr started — MODE_NAME={os.environ.get('MODE_NAME', 'powrr')}")
+    mode_name = os.environ.get("MODE_NAME", "powrr")
+    print(f"powrr started — MODE_NAME={mode_name}")
 
     while True:
         ui_mode, _, _ = app_state.snapshot()
@@ -160,7 +192,7 @@ def main() -> None:
         else:
             img = render_graph(history, data_store, app_state)
 
-        _send_frame(frame_socket, img)
+        _send_frame(frame_socket, img, mode_name)
 
         fps = 5 if _is_burst() else 1
         time.sleep(1.0 / fps)

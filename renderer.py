@@ -28,6 +28,60 @@ def _fmt(value, unit) -> str:
     return f"{value:.3f}{unit_str}"
 
 
+def _draw_battery_live(draw, soc, font_label) -> None:
+    """Battery outline + proportional fill + % label in the upper-right zone."""
+    soc = max(0.0, min(100.0, soc))
+
+    batt_x1, batt_y1 = 200, 3
+    batt_x2, batt_y2 = 244, 21
+    term_x1, term_y1 = 244, 10
+    term_x2, term_y2 = 248, 16
+
+    outline_brt = 180
+    fill_brt    = 220 if soc > 60 else (160 if soc > 30 else 100)
+
+    draw.rectangle([batt_x1, batt_y1, batt_x2, batt_y2], outline=outline_brt)
+    draw.rectangle([term_x1, term_y1, term_x2, term_y2],  outline=outline_brt)
+    draw.rectangle([term_x1 + 1, term_y1 + 1, term_x2 - 1, term_y2 - 1], fill=outline_brt)
+
+    fill_x1 = batt_x1 + 2
+    fill_y1 = batt_y1 + 2
+    fill_x2 = batt_x2 - 2
+    fill_y2 = batt_y2 - 2
+    filled_w = int(soc / 100.0 * (fill_x2 - fill_x1))
+    if filled_w > 0:
+        draw.rectangle([fill_x1, fill_y1, fill_x1 + filled_w, fill_y2], fill=fill_brt)
+
+    lbl  = f"{int(round(soc))}%"
+    bbox = draw.textbbox((0, 0), lbl, font=font_label)
+    lbl_w = bbox[2] - bbox[0]
+    cx = (batt_x1 + term_x2) // 2
+    draw.text((cx - lbl_w // 2, batt_y2 + 3), lbl, font=font_label, fill=200)
+
+
+def _draw_soc_column(draw, soc, plot_top, plot_bottom) -> None:
+    """Vertical block gauge (car-fuel-gauge style) in the rightmost column."""
+    soc = max(0.0, min(100.0, soc))
+
+    N       = 7
+    block_h = 5
+    gap     = 1
+    col_x1  = 249
+    col_x2  = 255
+    n_filled = round(soc / 100.0 * N)
+
+    for i in range(N):
+        # i=0 is the bottom block; fills from the bottom up
+        block_y2 = plot_bottom - i * (block_h + gap)
+        block_y1 = block_y2 - block_h + 1
+        if block_y1 < plot_top:
+            break
+        if i < n_filled:
+            draw.rectangle([col_x1, block_y1, col_x2, block_y2], fill=200)
+        else:
+            draw.rectangle([col_x1, block_y1, col_x2, block_y2], outline=60)
+
+
 def render_live(data_store, app_state) -> Image.Image:
     """
     Render the live values screen.
@@ -69,6 +123,10 @@ def render_live(data_store, app_state) -> Image.Image:
         v, u = data_store.get(sensor["id"])
         draw.text((x, divider_y + 2),  sensor["label"], font=font_label, fill=180)
         draw.text((x, divider_y + 11), _fmt(v, u),      font=font_small, fill=255)
+
+    soc = data_store.get_soc()
+    if soc is not None:
+        _draw_battery_live(draw, soc, font_label)
 
     return img
 
@@ -124,7 +182,7 @@ def render_graph(history, data_store, app_state) -> Image.Image:
     header_h    = 11
 
     plot_left   = y_label_w
-    plot_right  = width - 1
+    plot_right  = width - 9    # rightmost 8px reserved for SoC column
     plot_top    = header_h
     plot_bottom = height - x_label_h - 1   # y=53 for a 64px display
     plot_w      = plot_right - plot_left
@@ -133,6 +191,10 @@ def render_graph(history, data_store, app_state) -> Image.Image:
     # ── Axes ──────────────────────────────────────────────────────────────────
     draw.line([(plot_left, plot_top),    (plot_left, plot_bottom)],  fill=80)   # y-axis
     draw.line([(plot_left, plot_bottom), (plot_right, plot_bottom)], fill=80)   # x-axis
+
+    soc = data_store.get_soc()
+    if soc is not None:
+        _draw_soc_column(draw, soc, plot_top, plot_bottom)
 
     points = history.get_window(sensor["id"], window_s)
 
