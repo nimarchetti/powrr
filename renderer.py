@@ -4,13 +4,42 @@ from PIL import Image, ImageDraw, ImageFont
 
 from state import SENSORS
 
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+BORDER   = 1
+STRIP_H  = 24   # 2px top gap + 9pt label + 1px gap + 11pt value + 1px border buffer
+
+COL_BG        = (0, 0, 0)
+COL_WHITE     = (255, 255, 255)
+COL_LABEL     = (160, 160, 160)
+COL_AXIS      = (60, 60, 60)
+COL_ZERO_LINE = (100, 100, 100)
+COL_SOLAR     = (255, 220, 0)
+COL_LOAD      = (210, 50, 50)
+COL_FEED_IN   = (0, 200, 80)
+COL_GRID      = (140, 140, 200)
+COL_SOC_HIGH  = (0, 200, 80)
+COL_SOC_MID   = (255, 165, 0)
+COL_SOC_LOW   = (210, 50, 50)
+
+_SENSOR_COLOURS = [COL_SOLAR, COL_LOAD, COL_FEED_IN, COL_GRID]
+
+
+def _sensor_colour(sensor_index: int, value=None):
+    if sensor_index == 4:  # Battery — positive=charging (green), negative=discharging (red)
+        return COL_FEED_IN if (value or 0) >= 0 else COL_LOAD
+    return _SENSOR_COLOURS[sensor_index] if sensor_index < len(_SENSOR_COLOURS) else COL_WHITE
+
+
+def _soc_colour(soc: float):
+    if soc > 75:
+        return COL_SOC_HIGH
+    if soc > 25:
+        return COL_SOC_MID
+    return COL_SOC_LOW
+
 
 def load_font(size: int) -> ImageFont.FreeTypeFont:
-    """
-    Load a font at the given pixel size.
-    Uses FONT_PATH env var if set and the file exists; falls back to the
-    Pillow built-in default font otherwise.
-    """
     font_path = os.environ.get("FONT_PATH")
     if font_path:
         try:
@@ -21,98 +50,99 @@ def load_font(size: int) -> ImageFont.FreeTypeFont:
 
 
 def _fmt(value, unit) -> str:
-    """Format a sensor reading for display, returning '---' when no data."""
     if value is None:
         return "---"
     unit_str = f" {unit}" if unit else ""
     return f"{value:.3f}{unit_str}"
 
 
-def _draw_battery_live(draw, soc, font_label) -> None:
-    """Battery outline + proportional fill + % label in the upper-right zone."""
+def _draw_battery_live(draw, soc, font_label, divider_y) -> None:
     soc = max(0.0, min(100.0, soc))
 
-    batt_x1, batt_y1 = 200, 3
-    batt_x2, batt_y2 = 244, 21
-    term_x1, term_y1 = 244, 10
-    term_x2, term_y2 = 248, 16
+    batt_x1, batt_x2 = 200, 244
+    batt_y1 = BORDER + 2
+    batt_h  = max(18, divider_y // 3)
+    batt_y2 = batt_y1 + batt_h
+    term_x1 = 244
+    term_x2 = 248
+    term_y1 = batt_y1 + batt_h // 3
+    term_y2 = batt_y2 - batt_h // 3
 
-    outline_brt = 180
-    fill_brt    = 220 if soc > 60 else (160 if soc > 30 else 100)
+    fill_col = _soc_colour(soc)
 
-    draw.rectangle([batt_x1, batt_y1, batt_x2, batt_y2], outline=outline_brt)
-    draw.rectangle([term_x1, term_y1, term_x2, term_y2],  outline=outline_brt)
-    draw.rectangle([term_x1 + 1, term_y1 + 1, term_x2 - 1, term_y2 - 1], fill=outline_brt)
+    draw.rectangle([batt_x1, batt_y1, batt_x2, batt_y2], outline=COL_LABEL)
+    draw.rectangle([term_x1, term_y1, term_x2, term_y2],  outline=COL_LABEL)
+    draw.rectangle([term_x1 + 1, term_y1 + 1, term_x2 - 1, term_y2 - 1], fill=COL_LABEL)
 
-    fill_x1 = batt_x1 + 2
-    fill_y1 = batt_y1 + 2
-    fill_x2 = batt_x2 - 2
-    fill_y2 = batt_y2 - 2
+    fill_x1  = batt_x1 + 2
+    fill_y1  = batt_y1 + 2
+    fill_x2  = batt_x2 - 2
+    fill_y2  = batt_y2 - 2
     filled_w = int(soc / 100.0 * (fill_x2 - fill_x1))
     if filled_w > 0:
-        draw.rectangle([fill_x1, fill_y1, fill_x1 + filled_w, fill_y2], fill=fill_brt)
+        draw.rectangle([fill_x1, fill_y1, fill_x1 + filled_w, fill_y2], fill=fill_col)
 
     lbl  = f"{int(round(soc))}%"
     bbox = draw.textbbox((0, 0), lbl, font=font_label)
     lbl_w = bbox[2] - bbox[0]
     cx = (batt_x1 + term_x2) // 2
-    draw.text((cx - lbl_w // 2, batt_y2 + 3), lbl, font=font_label, fill=200)
+    draw.text((cx - lbl_w // 2, batt_y2 + 3), lbl, font=font_label, fill=COL_LABEL)
 
 
-def _draw_soc_column(draw, soc, plot_top, plot_bottom) -> None:
-    """Vertical block gauge (car-fuel-gauge style) in the rightmost column."""
+def _draw_soc_column(draw, soc, plot_top, plot_bottom, width) -> None:
     soc = max(0.0, min(100.0, soc))
 
-    N       = 7
-    block_h = 5
-    gap     = 1
-    col_x1  = 249
-    col_x2  = 255
+    block_h  = 4
+    gap      = 1
+    box_x2   = width - 1 - BORDER          # right edge of outline box
+    box_x1   = box_x2 - 9                  # 10px wide box (1+1+6+1+1)
+
+    # White outline — represents 100% capacity
+    draw.rectangle([box_x1, plot_top, box_x2, plot_bottom], outline=COL_WHITE)
+
+    # Inner block area (1px gap inside outline on each side)
+    inner_x1 = box_x1 + 2
+    inner_x2 = box_x2 - 2
+    inner_y1 = plot_top + 2
+    inner_y2 = plot_bottom - 2
+    inner_h  = inner_y2 - inner_y1 + 1
+
+    N        = max(1, (inner_h + gap) // (block_h + gap))
     n_filled = round(soc / 100.0 * N)
+    fill_col = _soc_colour(soc)
 
     for i in range(N):
-        # i=0 is the bottom block; fills from the bottom up
-        block_y2 = plot_bottom - i * (block_h + gap)
-        block_y1 = block_y2 - block_h + 1
-        if block_y1 < plot_top:
+        by2 = inner_y2 - i * (block_h + gap)
+        by1 = by2 - block_h + 1
+        if by1 < inner_y1:
             break
         if i < n_filled:
-            draw.rectangle([col_x1, block_y1, col_x2, block_y2], fill=200)
-        else:
-            draw.rectangle([col_x1, block_y1, col_x2, block_y2], outline=60)
+            draw.rectangle([inner_x1, by1, inner_x2, by2], fill=fill_col)
 
 
-def render_live(data_store, app_state) -> Image.Image:
-    """
-    Render the live values screen.
-
-    Layout (256×64):
-      - Top zone (~43px): selected sensor label + hero value
-      - Divider line at y=43
-      - Bottom strip (20px): other 3 sensors in equal columns
-    """
+def render_live(data_store, app_state, width: int = 256, height: int = 64) -> Image.Image:
+    B = BORDER
     _, selected_index, _ = app_state.snapshot()
-    width  = int(os.environ.get("DISPLAY_WIDTH",  256))
-    height = int(os.environ.get("DISPLAY_HEIGHT",  64))
 
-    img  = Image.new("L", (width, height), 0)
+    img  = Image.new("RGB", (width, height), COL_BG)
     draw = ImageDraw.Draw(img)
 
     font_hero  = load_font(28)
-    font_small = load_font(10)
-    font_label = load_font(8)
+    font_small = load_font(11)
+    font_label = load_font(9)
 
-    divider_y = height - 21   # leaves 21px for the bottom strip
+    divider_y = height - STRIP_H  # fixed strip height; hero area scales with display
 
     # ── Hero sensor ───────────────────────────────────────────────────────────
     selected = SENSORS[selected_index]
     value, unit = data_store.get(selected["id"])
+    hero_col = _sensor_colour(selected_index, value)
 
-    draw.text((2, 1),  selected["label"],       font=font_label, fill=200)
-    draw.text((2, 11), _fmt(value, unit),        font=font_hero,  fill=255)
+    draw.text((2, B + 1),  selected["label"],  font=font_label, fill=COL_WHITE)
+    draw.text((2, B + 10), _fmt(value, unit),   font=font_hero,  fill=hero_col)
 
     # ── Divider ───────────────────────────────────────────────────────────────
-    draw.line([(0, divider_y), (width - 1, divider_y)], fill=100)
+    draw.line([(B, divider_y), (width - 1 - B, divider_y)], fill=COL_AXIS)
 
     # ── Bottom strip — the other sensors ─────────────────────────────────────
     others    = [s for i, s in enumerate(SENSORS) if i != selected_index]
@@ -121,18 +151,19 @@ def render_live(data_store, app_state) -> Image.Image:
     for col, sensor in enumerate(others):
         x = col * col_width + 2
         v, u = data_store.get(sensor["id"])
-        draw.text((x, divider_y + 2),  sensor["label"], font=font_label, fill=180)
-        draw.text((x, divider_y + 11), _fmt(v, u),      font=font_small, fill=255)
+        orig_idx = SENSORS.index(sensor)
+        val_col = _sensor_colour(orig_idx, v)
+        draw.text((x, divider_y + 2),  sensor["label"], font=font_label, fill=COL_WHITE)
+        draw.text((x, divider_y + 12), _fmt(v, u),      font=font_small, fill=val_col)
 
     soc = data_store.get_soc()
     if soc is not None:
-        _draw_battery_live(draw, soc, font_label)
+        _draw_battery_live(draw, soc, font_label, divider_y)
 
     return img
 
 
 def _fmt_age(seconds: float) -> str:
-    """Format a positive number of seconds as a short age string, e.g. '-5m'."""
     s = int(abs(seconds))
     if s < 60:
         return f"-{s}s"
@@ -143,58 +174,47 @@ def _fmt_age(seconds: float) -> str:
     return f"-{h}h{rem}m" if rem else f"-{h}h"
 
 
-def render_graph(history, data_store, app_state) -> Image.Image:
-    """
-    Render the graph screen for the selected sensor.
-
-    Layout (256×64):
-      - Header (11px):  sensor label + current value
-      - Y-axis labels:  28px left margin; v_max near top, v_min near baseline
-      - Plot area:      x=28..255, y=11..54
-      - X-axis line:    y=54
-      - X-axis labels:  y=55..63; oldest-point age at left, 'now' at right
-      - 'Waiting...' shown until at least 2 data points exist
-    """
+def render_graph(history, data_store, app_state, width: int = 256, height: int = 64) -> Image.Image:
     import time as _time
 
+    B = BORDER
     _, selected_index, _ = app_state.snapshot()
-    width    = int(os.environ.get("DISPLAY_WIDTH",          256))
-    height   = int(os.environ.get("DISPLAY_HEIGHT",          64))
     window_s = float(os.environ.get("GRAPH_WINDOW_SECONDS", 3600))
 
-    img  = Image.new("L", (width, height), 0)
+    img  = Image.new("RGB", (width, height), COL_BG)
     draw = ImageDraw.Draw(img)
 
-    font_small = load_font(10)
-    font_label = load_font(8)
+    font_small = load_font(11)
+    font_label = load_font(9)
     font_axis  = load_font(7)
 
     sensor = SENSORS[selected_index]
     value, unit = data_store.get(sensor["id"])
+    col = _sensor_colour(selected_index, value)
 
     # ── Header ────────────────────────────────────────────────────────────────
     header = f"{sensor['label']}  {_fmt(value, unit)}"
-    draw.text((2, 1), header, font=font_label, fill=255)
+    draw.text((2, B + 1), header, font=font_label, fill=COL_WHITE)
 
     # ── Layout constants ──────────────────────────────────────────────────────
-    y_label_w   = 28          # px reserved on the left for y-axis labels
-    x_label_h   = 10          # px reserved at the bottom for x-axis labels
+    y_label_w   = 28
+    x_label_h   = 10
     header_h    = 11
 
     plot_left   = y_label_w
-    plot_right  = width - 9    # rightmost 8px reserved for SoC column
+    plot_right  = width - 16       # 10px SOC box + 3px margin + right edge
     plot_top    = header_h
-    plot_bottom = height - x_label_h - 1   # y=53 for a 64px display
+    plot_bottom = height - x_label_h - 1
     plot_w      = plot_right - plot_left
     plot_h      = plot_bottom - plot_top
 
     # ── Axes ──────────────────────────────────────────────────────────────────
-    draw.line([(plot_left, plot_top),    (plot_left, plot_bottom)],  fill=80)   # y-axis
-    draw.line([(plot_left, plot_bottom), (plot_right, plot_bottom)], fill=80)   # x-axis
+    draw.line([(plot_left, plot_top),    (plot_left, plot_bottom)],  fill=COL_AXIS)
+    draw.line([(plot_left, plot_bottom), (plot_right, plot_bottom)], fill=COL_AXIS)
 
     soc = data_store.get_soc()
     if soc is not None:
-        _draw_soc_column(draw, soc, plot_top, plot_bottom)
+        _draw_soc_column(draw, soc, plot_top, plot_bottom, width)
 
     points = history.get_window(sensor["id"], window_s)
 
@@ -206,7 +226,7 @@ def render_graph(history, data_store, app_state) -> Image.Image:
             (plot_left + (plot_w - tw) // 2, plot_top + plot_h // 2 - 5),
             msg,
             font=font_small,
-            fill=180,
+            fill=COL_LABEL,
         )
         return img
 
@@ -229,33 +249,31 @@ def render_graph(history, data_store, app_state) -> Image.Image:
         return x, y
 
     coords = [to_xy(t, v) for t, v in points]
-    draw.line(coords, fill=255, width=1)
+    draw.line(coords, fill=col, width=1)
 
-    # ── Zero line (only when range spans both positive and negative) ─────────
+    # ── Zero line (when range spans both positive and negative) ───────────────
     if v_min < 0 < v_max:
         _, zero_y = to_xy(t_min, 0.0)
-        draw.line([(plot_left, zero_y), (plot_right, zero_y)], fill=120)
+        draw.line([(plot_left, zero_y), (plot_right, zero_y)], fill=COL_ZERO_LINE)
 
-    # ── Y-axis labels (numeric only; unit is in the header) ───────────────────
+    # ── Y-axis labels ─────────────────────────────────────────────────────────
     def fmt_val(v: float) -> str:
         return f"{v:.1f}" if abs(v) < 100 else f"{int(v)}"
 
-    # v_max near the top of the plot
-    draw.text((1, plot_top), fmt_val(v_max), font=font_axis, fill=160)
+    draw.text((1, plot_top), fmt_val(v_max), font=font_axis, fill=COL_LABEL)
 
-    # v_min just above the x-axis baseline
     min_lbl  = fmt_val(v_min)
     min_bbox = draw.textbbox((0, 0), min_lbl, font=font_axis)
     min_h    = min_bbox[3] - min_bbox[1]
-    draw.text((1, plot_bottom - min_h), min_lbl, font=font_axis, fill=160)
+    draw.text((1, plot_bottom - min_h), min_lbl, font=font_axis, fill=COL_LABEL)
 
-    # ── X-axis labels: age of oldest point (left) and 'now' (right) ───────────
+    # ── X-axis labels ─────────────────────────────────────────────────────────
     age_lbl  = _fmt_age(now - t_min)
-    draw.text((plot_left + 1, plot_bottom + 2), age_lbl, font=font_axis, fill=160)
+    draw.text((plot_left + 1, plot_bottom + 2), age_lbl, font=font_axis, fill=COL_LABEL)
 
     now_lbl  = "now"
     now_bbox = draw.textbbox((0, 0), now_lbl, font=font_axis)
     now_w    = now_bbox[2] - now_bbox[0]
-    draw.text((plot_right - now_w, plot_bottom + 2), now_lbl, font=font_axis, fill=160)
+    draw.text((plot_right - now_w, plot_bottom + 2), now_lbl, font=font_axis, fill=COL_LABEL)
 
     return img

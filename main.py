@@ -16,19 +16,11 @@ data_store = DataStore()
 app_state  = AppState()
 history    = History()
 
-_burst_until = 0.0
-_burst_lock  = threading.Lock()
+_render_wake = threading.Event()   # set by event thread to wake render loop immediately
 
 
-def _set_burst() -> None:
-    global _burst_until
-    with _burst_lock:
-        _burst_until = time.time() + 1.0
-
-
-def _is_burst() -> bool:
-    with _burst_lock:
-        return time.time() < _burst_until
+def _wake_render() -> None:
+    _render_wake.set()
 
 
 # ── MQTT ──────────────────────────────────────────────────────────────────────
@@ -108,21 +100,23 @@ def _start_event_listener(zmq_context: zmq.Context) -> None:
 
                 if event == "MODE_ACTIVE" and msg.get("mode") == my_mode:
                     app_state.set_active(True)
+                    _render_wake.set()   # start rendering at active rate immediately
 
                 elif event == "MODE_INACTIVE" and msg.get("mode") == my_mode:
                     app_state.set_active(False)
+                    _render_wake.set()   # wake so loop can switch to inactive rate
 
                 elif event == "ENCODER_DELTA":
                     _, _, active = app_state.snapshot()
                     if active:
                         app_state.step_index(msg.get("delta", 0))
-                        _set_burst()
+                        _wake_render()
 
                 elif event == "ENCODER_PUSH":
                     _, _, active = app_state.snapshot()
                     if active:
                         app_state.toggle_mode()
-                        _set_burst()
+                        _wake_render()
 
             except Exception as exc:
                 print(f"Event error: {exc}")
@@ -181,21 +175,26 @@ def main() -> None:
     _start_mqtt()
     _start_event_listener(zmq_context)
 
-    mode_name = os.environ.get("MODE_NAME", "powrr")
-    print(f"powrr started — MODE_NAME={mode_name}")
+    mode_name    = os.environ.get("MODE_NAME", "powrr")
+    display_sizes = _parse_display_sizes()
+    print(f"powrr started — MODE_NAME={mode_name} sizes={display_sizes}")
 
     while True:
         ui_mode, _, _ = app_state.snapshot()
 
-        if ui_mode == UIMode.LIVE:
-            img = render_live(data_store, app_state)
-        else:
-            img = render_graph(history, data_store, app_state)
+        for (w, h) in display_sizes:
+            if ui_mode == UIMode.LIVE:
+                img = render_live(data_store, app_state, w, h)
+            else:
+                img = render_graph(history, data_store, app_state, w, h)
+            _send_frame(frame_socket, img, mode_name)
 
-        _send_frame(frame_socket, img, mode_name)
-
-        fps = 5 if _is_burst() else 1
-        time.sleep(1.0 / fps)
+        _, _, active = app_state.snapshot()
+        # Active: cap at 10 fps but wake instantly on any input.
+        # Inactive: 1 fps — frames aren't shown, no point going faster.
+        interval = 0.1 if active else 1.0
+        _render_wake.wait(timeout=interval)
+        _render_wake.clear()
 
 
 if __name__ == "__main__":
